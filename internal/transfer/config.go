@@ -118,6 +118,10 @@ func parseArguments(argv []string) (arguments, error) {
 		"profile": true, "profile-file": true, "endpoint": true, "transport": true,
 		"spool": true, "proxy": true, "timeout": true, "attempts": true, "name": true, "reconnect-ms": true,
 	}
+	return parseOptions(argv, booleanNames, valueNames)
+}
+
+func parseOptions(argv []string, booleanNames, valueNames map[string]bool) (arguments, error) {
 	result := arguments{command: "help", flags: make(map[string]string), booleans: make(map[string]bool)}
 	if len(argv) == 0 {
 		return result, nil

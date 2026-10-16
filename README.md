@@ -1,4 +1,4 @@
-# Secure Transmission (Go)
+# Secure Transmission
 
 A Go rewrite of `server.mjs` and `generated-client-tui.mjs` from the sibling
 `secure-transmitting` project. Work lives in this fresh repository; the original
@@ -10,8 +10,8 @@ Each completed implementation step has its own Git commit.
 
 - [x] Start the Go module and record the migration scope.
 - [x] Port the client, encrypted records, filesystem access, and resumable spools.
-- [ ] Implement server identity, durable storage, HTTP/WebSocket reception, and ping.
-- [ ] Implement authenticated browsing, previews, and server-requested downloads.
+- [x] Implement server identity, durable storage, HTTP/WebSocket reception, and ping.
+- [x] Implement authenticated browsing, previews, and server-requested downloads.
 - [ ] Add the interactive server TUI and personalized client generation.
 - [ ] Verify interoperability, document usage, and build distributable binaries.
 
