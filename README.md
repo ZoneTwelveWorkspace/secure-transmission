@@ -12,7 +12,8 @@ Each completed implementation step has its own Git commit.
 - [x] Port the client, encrypted records, filesystem access, and resumable spools.
 - [x] Implement server identity, durable storage, HTTP/WebSocket reception, and ping.
 - [x] Implement authenticated browsing, previews, and server-requested downloads.
-- [ ] Add the interactive server TUI and personalized client generation.
+- [x] Add the interactive server TUI.
+- [ ] Add personalized client generation.
 - [ ] Verify interoperability, document usage, and build distributable binaries.
 
 Protocol compatibility with the original implementation is a migration target:

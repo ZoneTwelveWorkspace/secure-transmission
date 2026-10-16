@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"golang.org/x/term"
 )
 
 const serverHelp = `Usage: server <command> [options]
@@ -16,6 +18,7 @@ const serverHelp = `Usage: server <command> [options]
 Commands:
   init                          Create server keys and a trusted client profile
   serve                         Start the HTTP/WebSocket receiver
+  tui                           Start the receiver with a remote filesystem TUI
   profile --endpoint <url>       Print a trusted client profile
 
 Options:
@@ -24,11 +27,12 @@ Options:
   --port <number>                Listen port (default 8080)
   --path <path>                  Encrypted transfer endpoint (default /)
   --max-bytes <number>           Transfer size limit (default 1073741824)
+  --tui                         Enable the TUI with the serve command
 `
 
 // RunServer implements the receiver's command line.
 func RunServer(argv []string) error {
-	args, err := parseOptions(argv, map[string]bool{}, map[string]bool{"state": true, "endpoint": true, "host": true, "port": true, "path": true, "max-bytes": true})
+	args, err := parseOptions(argv, map[string]bool{"tui": true}, map[string]bool{"state": true, "endpoint": true, "host": true, "port": true, "path": true, "max-bytes": true})
 	if err != nil {
 		return err
 	}
@@ -57,7 +61,11 @@ func RunServer(argv []string) error {
 		}
 		_, err = fmt.Fprintln(os.Stdout, encodeProfile(p))
 		return err
-	case "serve":
+	case "serve", "tui":
+		interactive := args.command == "tui" || args.booleans["tui"]
+		if interactive && (!term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd()))) {
+			return errors.New("TUI requires an interactive terminal; use serve for background mode")
+		}
 		port, err := args.numeric("port", 8080, 0, 65535)
 		if err != nil {
 			return err
@@ -73,6 +81,9 @@ func RunServer(argv []string) error {
 		defer s.close()
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		if interactive {
+			return runTui(ctx, s, os.Stdin, os.Stdout)
+		}
 		fmt.Fprintf(os.Stdout, "Listening on %s\nReceived files: %s\n", s.url, filepath.Join(state, "received"))
 		<-ctx.Done()
 		return s.close()
