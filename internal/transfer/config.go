@@ -112,7 +112,7 @@ func parseArguments(argv []string) (arguments, error) {
 	booleanNames := map[string]bool{"stdin": true, "tor": true, "allow-http": true, "no-browse": true}
 	valueNames := map[string]bool{
 		"profile": true, "profile-file": true, "endpoint": true, "transport": true,
-		"spool": true, "proxy": true, "timeout": true, "attempts": true, "name": true,
+		"spool": true, "proxy": true, "timeout": true, "attempts": true, "name": true, "reconnect-ms": true,
 	}
 	result := arguments{command: "help", flags: make(map[string]string), booleans: make(map[string]bool)}
 	if len(argv) == 0 {

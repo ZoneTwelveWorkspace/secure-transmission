@@ -35,17 +35,21 @@ Options:
   --allow-http                    Explicitly allow remote HTTP/WS without outer TLS
   --timeout <milliseconds>        Request timeout (default 15000)
   --attempts <count>              Bounded delivery retries (default 4)
+  --reconnect-ms <milliseconds>   Fixed watch reconnect delay (default 300000)
   --name <label>                  Optional label in the server TUI (no hostname is sent by default)
-  --no-browse                     Disable remote filesystem listing and metadata reads
+  --no-browse                     Disable remote listings, previews, and downloads
 
 Only the server decrypts file uploads and listings. Browse controls are encrypted and signed.
-watch allows the pinned server to list and inspect metadata for paths this OS account can read.
+watch allows the pinned server to read/download any path this OS account can read.
 `
 
 // RunClient runs the client with an optional trusted profile embedded at build time.
 func RunClient(argv []string, pinnedProfile string) error {
 	if len(argv) == 0 {
-		argv = []string{"watch"}
+		argv = []string{"help"}
+		if pinnedProfile != "" {
+			argv = []string{"watch"}
+		}
 	}
 	args, err := parseArguments(argv)
 	if err != nil {
@@ -75,6 +79,9 @@ func RunClient(argv []string, pinnedProfile string) error {
 			encoded = pinnedProfile
 		}
 	}
+	if encoded == "" {
+		return errors.New("supply a trusted --profile, --profile-file, or personalized client")
+	}
 	p, err := decodeProfile(encoded)
 	if err != nil {
 		return err
@@ -97,6 +104,10 @@ func RunClient(argv []string, pinnedProfile string) error {
 	if err != nil {
 		return err
 	}
+	reconnectMS, err := args.numeric("reconnect-ms", 300_000, 100, 86_400_000)
+	if err != nil {
+		return err
+	}
 	label := args.option("name", "")
 	if len([]byte(label)) > 128 {
 		return errors.New("--name is too long")
@@ -112,7 +123,7 @@ func RunClient(argv []string, pinnedProfile string) error {
 	transport, err := newTransport(p, networkOptions{
 		mode: mode, proxy: args.option("proxy", ""), tor: args.booleans["tor"],
 		allowHTTP: args.booleans["allow-http"], timeout: time.Duration(timeoutMilliseconds) * time.Millisecond,
-		attempts: attempts, filesystem: browser,
+		attempts: attempts, filesystem: browser, reconnectDelay: time.Duration(reconnectMS) * time.Millisecond,
 		onConnect: func() {
 			if args.command == "watch" {
 				_, _ = os.Stdout.WriteString("Connected; server identity verified.\n")

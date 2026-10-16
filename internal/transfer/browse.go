@@ -9,22 +9,26 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const pageSize = 200
+const previewBytes = 64 * 1024
 
 var controlDomain = []byte("secure-transmitting/v1/filesystem-control")
 
 type browseQuery struct {
-	Type   string `json:"type"`
-	Path   string `json:"path"`
-	Offset *int64 `json:"offset,omitempty"`
+	Type     string `json:"type"`
+	Path     string `json:"path"`
+	Offset   *int64 `json:"offset,omitempty"`
+	Transfer string `json:"transfer,omitempty"`
 }
 
 type browseCommand struct {
@@ -64,6 +68,24 @@ type browseErrorResult struct {
 	Message string `json:"message"`
 }
 
+type browsePreviewResult struct {
+	Type     string      `json:"type"`
+	Entry    remoteEntry `json:"entry"`
+	Offset   int64       `json:"offset"`
+	Next     *int64      `json:"next"`
+	Encoding string      `json:"encoding"`
+	Content  string      `json:"content"`
+}
+
+type browseDownloadResult struct {
+	Type         string `json:"type"`
+	Transfer     string `json:"transfer"`
+	Bytes        int64  `json:"bytes"`
+	Entries      int    `json:"entries"`
+	SkippedLinks int    `json:"skippedLinks"`
+	Destination  string `json:"-"`
+}
+
 type filesystemBrowser struct {
 	name string
 	cwd  string
@@ -82,14 +104,17 @@ func newFilesystemBrowser(name string) (*filesystemBrowser, error) {
 }
 
 func validateBrowseQuery(query browseQuery) error {
-	if query.Type != "list" && query.Type != "stat" {
+	if query.Type != "list" && query.Type != "stat" && query.Type != "preview" && query.Type != "download" {
 		return errors.New("invalid browse request")
 	}
 	if query.Path == "" || strings.ContainsRune(query.Path, 0) || len([]byte(query.Path)) > 16*1024 {
 		return errors.New("invalid browse request")
 	}
-	if query.Offset != nil && (*query.Offset < 0 || *query.Offset > 1_000_000) {
+	if query.Offset != nil && (*query.Offset < 0 || uint64(*query.Offset) > maxSafeInteger || (query.Type == "list" && *query.Offset > 1_000_000)) {
 		return errors.New("invalid browse request")
+	}
+	if query.Type == "download" && !idPattern.MatchString(query.Transfer) {
+		return errors.New("invalid download request")
 	}
 	return nil
 }
@@ -208,6 +233,12 @@ func (b *filesystemBrowser) query(query browseQuery) any {
 		}
 		return browseStatResult{Type: "stat", Entry: entry}
 	}
+	if query.Type == "preview" {
+		return b.preview(query)
+	}
+	if query.Type == "download" {
+		return browseErrorResult{Type: "error", Message: "Downloads require the encrypted transfer handler"}
+	}
 	directory, err := filepath.EvalSymlinks(requested)
 	if err != nil {
 		return browseFilesystemError(err)
@@ -221,19 +252,31 @@ func (b *filesystemBrowser) query(query browseQuery) any {
 		return browseFilesystemError(err)
 	}
 	defer file.Close()
-	items, err := file.ReadDir(-1)
-	if err != nil {
-		return browseFilesystemError(err)
-	}
 	offset := int64(0)
 	if query.Offset != nil {
 		offset = *query.Offset
 	}
-	position := offset
-	entries := make([]remoteEntry, 0, pageSize)
-	for index := int(offset); index < len(items) && len(entries) < pageSize; index++ {
+	position := int64(0)
+	for position < offset {
+		if _, err := file.ReadDir(1); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return browseFilesystemError(err)
+		}
 		position++
-		entry, entryErr := b.entry(filepath.Join(directory, items[index].Name()))
+	}
+	entries := make([]remoteEntry, 0, pageSize)
+	for len(entries) < pageSize {
+		items, err := file.ReadDir(1)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return browseFilesystemError(err)
+		}
+		position++
+		entry, entryErr := b.entry(filepath.Join(directory, items[0].Name()))
 		if entryErr == nil {
 			entries = append(entries, entry)
 		}
@@ -245,9 +288,11 @@ func (b *filesystemBrowser) query(query browseQuery) any {
 		return entries[i].Name < entries[j].Name
 	})
 	var next *int64
-	if len(entries) == pageSize && position < int64(len(items)) {
-		value := position
-		next = &value
+	if len(entries) == pageSize {
+		if extra, _ := file.ReadDir(1); len(extra) != 0 {
+			value := position
+			next = &value
+		}
 	}
 	parentValue := filepath.Dir(directory)
 	var parent *string
@@ -272,6 +317,7 @@ func browseFilesystemError(err error) browseErrorResult {
 func browseHello(key []byte, browser *filesystemBrowser) map[string]any {
 	return map[string]any{
 		"key": base64RawURL(key), "name": browser.name, "cwd": browser.cwd, "platform": platformName(),
+		"capabilities": []string{"preview", "download"},
 	}
 }
 
@@ -288,4 +334,80 @@ func platformName() string {
 	default:
 		return runtime.GOOS
 	}
+}
+
+func (b *filesystemBrowser) preview(query browseQuery) any {
+	resolved, err := filepath.EvalSymlinks(b.resolve(query.Path))
+	if err != nil {
+		return browseFilesystemError(err)
+	}
+	metadata, err := b.entry(resolved)
+	if err != nil {
+		return browseFilesystemError(err)
+	}
+	if metadata.Type != "file" {
+		return browseErrorResult{Type: "error", Message: "Only regular files can be previewed"}
+	}
+	file, err := openReadNoFollow(resolved)
+	if err != nil {
+		return browseFilesystemError(err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return browseFilesystemError(err)
+	}
+	if !info.Mode().IsRegular() {
+		return browseErrorResult{Type: "error", Message: "Only regular files can be previewed"}
+	}
+	offset := int64(0)
+	if query.Offset != nil {
+		offset = *query.Offset
+	}
+	if offset > info.Size() {
+		return browseErrorResult{Type: "error", Message: "Preview offset exceeds file size"}
+	}
+	length := min(int64(previewBytes), info.Size()-offset)
+	data := make([]byte, length)
+	defer clear(data)
+	if n, err := file.ReadAt(data, offset); n != len(data) || (err != nil && err != io.EOF) {
+		return browseErrorResult{Type: "error", Message: "Source file changed while previewing"}
+	}
+	consumed := len(data)
+	encoding := "utf8"
+	for at := 0; at < len(data); {
+		if data[at] == 0 {
+			encoding = "hex"
+			break
+		}
+		r, size := utf8.DecodeRune(data[at:])
+		if r == utf8.RuneError && size == 1 {
+			if offset+int64(len(data)) < info.Size() && !utf8.FullRune(data[at:]) {
+				consumed = at
+				break
+			}
+			encoding = "hex"
+			break
+		}
+		at += size
+	}
+	content := string(data[:consumed])
+	if encoding == "hex" {
+		var output strings.Builder
+		for at := 0; at < len(data); at += 16 {
+			output.WriteString(hex.EncodeToString(data[at:min(at+16, len(data))]))
+			if at+16 <= len(data) {
+				output.WriteByte('\n')
+			}
+		}
+		content = output.String()
+		consumed = len(data)
+	}
+	var next *int64
+	if end := offset + int64(consumed); end < info.Size() {
+		next = &end
+	}
+	metadata.Size = info.Size()
+	metadata.Modified = float64(info.ModTime().UnixNano()) / 1e6
+	return browsePreviewResult{Type: "preview", Entry: metadata, Offset: offset, Next: next, Encoding: encoding, Content: content}
 }

@@ -125,3 +125,41 @@ func testEncryptionProfile(t *testing.T) (*ecdh.PrivateKey, profile) {
 		Token: base64.RawURLEncoding.EncodeToString(token), Endpoint: "http://127.0.0.1:8080/",
 	}
 }
+
+func TestDownloadStreamSkipsNestedLinksAndBindsEveryRecord(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require Windows privileges")
+	}
+	private, p := testEncryptionProfile(t)
+	root := t.TempDir()
+	source := filepath.Join(root, "folder")
+	if err := os.MkdirAll(filepath.Join(source, "empty"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "file"), []byte("included"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", filepath.Join(source, "broken")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".", filepath.Join(source, "cycle")); err != nil {
+		t.Fatal(err)
+	}
+	job := strings.Repeat("a", 32)
+	_, _, err := streamTransfer(p, []string{source}, "", job, true, func(item transferFrame) error {
+		if item.entries != 3 || item.skippedLinks != 2 {
+			t.Fatalf("wrong manifest counts: %#v", item)
+		}
+		record, _, err := openTestRecord(private, item.frame)
+		if err != nil {
+			return err
+		}
+		if record.Operation.(map[string]any)["job"] != job {
+			t.Fatal("download record lost connection binding")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

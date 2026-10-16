@@ -32,12 +32,14 @@ type transferSource struct {
 }
 
 type transferFrame struct {
-	frame    []byte
-	id       string
-	expires  int64
-	phase    string
-	transfer string
-	total    int64
+	frame        []byte
+	id           string
+	expires      int64
+	phase        string
+	transfer     string
+	total        int64
+	entries      int
+	skippedLinks int
 }
 
 type spoolFrame struct {
@@ -65,9 +67,15 @@ type packedTransfer struct {
 var invalidManifestName = regexp.MustCompile(`[\x00-\x1f\x7f\\:*?"<>|]`)
 
 func collectSources(paths []string) ([]transferSource, int64, error) {
+	sources, total, _, err := collectSourcesWithLinks(paths, false)
+	return sources, total, err
+}
+
+func collectSourcesWithLinks(paths []string, skipLinks bool) ([]transferSource, int64, int, error) {
 	if len(paths) == 0 {
-		return nil, 0, errors.New("select at least one file or directory")
+		return nil, 0, 0, errors.New("select at least one file or directory")
 	}
+	skipped := 0
 	sources := make([]transferSource, 0)
 	var visit func(string, string) error
 	visit = func(source, relative string) error {
@@ -76,6 +84,10 @@ func collectSources(paths []string) ([]transferSource, int64, error) {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
+			if skipLinks {
+				skipped++
+				return nil
+			}
 			return errors.New("symbolic links are not supported")
 		}
 		if len(sources) >= 10_000 {
@@ -109,14 +121,14 @@ func collectSources(paths []string) ([]transferSource, int64, error) {
 	for _, selected := range paths {
 		source, err := filepath.Abs(selected)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		name := filepath.Base(source)
 		if name == "." || name == string(filepath.Separator) || name == "" {
-			return nil, 0, errors.New("select a directory below the filesystem root")
+			return nil, 0, 0, errors.New("select a directory below the filesystem root")
 		}
 		if err := visit(source, name); err != nil {
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 	}
 	entries := make([]manifestEntry, len(sources))
@@ -125,9 +137,9 @@ func collectSources(paths []string) ([]transferSource, int64, error) {
 	}
 	total, err := validateEntries(entries)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
-	return sources, total, nil
+	return sources, total, skipped, nil
 }
 
 func validateEntries(entries []manifestEntry) (int64, error) {
@@ -151,7 +163,7 @@ func validateEntries(entries []manifestEntry) (int64, error) {
 		if _, exists := seen[entry.Path]; exists {
 			return 0, errors.New("unsafe archive path")
 		}
-		if entry.Size > math.MaxInt64-total {
+		if entry.Size > math.MaxInt64-total || uint64(entry.Size) > maxSafeInteger || uint64(total+entry.Size) > maxSafeInteger {
 			return 0, errors.New("invalid manifest")
 		}
 		total += entry.Size
@@ -169,7 +181,11 @@ func validateEntries(entries []manifestEntry) (int64, error) {
 }
 
 func streamEncryptedTransfer(p profile, paths []string, transfer string, callback func(transferFrame) error) (string, int64, error) {
-	sources, total, err := collectSources(paths)
+	return streamTransfer(p, paths, transfer, "", false, callback)
+}
+
+func streamTransfer(p profile, paths []string, transfer, job string, skipLinks bool, callback func(transferFrame) error) (string, int64, error) {
+	sources, total, skipped, err := collectSourcesWithLinks(paths, skipLinks)
 	if err != nil {
 		return "", 0, err
 	}
@@ -179,7 +195,7 @@ func streamEncryptedTransfer(p profile, paths []string, transfer string, callbac
 			return "", 0, err
 		}
 	}
-	if !idPattern.MatchString(transfer) {
+	if !idPattern.MatchString(transfer) || (job != "" && !idPattern.MatchString(job)) {
 		return "", 0, errors.New("invalid transfer binding")
 	}
 	key, err := decodePublicEncryptionKey(p.EncryptionKey)
@@ -187,6 +203,9 @@ func streamEncryptedTransfer(p profile, paths []string, transfer string, callbac
 		return "", 0, err
 	}
 	makeFrame := func(phase string, operation any, data []byte) error {
+		if job != "" {
+			operation.(map[string]any)["job"] = job
+		}
 		record, err := newRecord(p.Token, operation)
 		if err != nil {
 			return err
@@ -197,6 +216,7 @@ func streamEncryptedTransfer(p profile, paths []string, transfer string, callbac
 		}
 		return callback(transferFrame{
 			frame: frame, id: record.ID, expires: record.Expires, phase: phase, transfer: transfer, total: total,
+			entries: len(sources), skippedLinks: skipped,
 		})
 	}
 	entries := make([]manifestEntry, len(sources))

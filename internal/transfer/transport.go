@@ -21,15 +21,16 @@ import (
 )
 
 type networkOptions struct {
-	mode       string
-	proxy      string
-	tor        bool
-	allowHTTP  bool
-	timeout    time.Duration
-	attempts   int
-	onEvent    func(receipt)
-	onConnect  func()
-	filesystem *filesystemBrowser
+	mode           string
+	proxy          string
+	tor            bool
+	allowHTTP      bool
+	timeout        time.Duration
+	attempts       int
+	reconnectDelay time.Duration
+	onEvent        func(receipt)
+	onConnect      func()
+	filesystem     *filesystemBrowser
 }
 
 type rejectedError struct{ message string }
@@ -93,6 +94,9 @@ type Transport struct {
 }
 
 func newTransport(p profile, options networkOptions) (*Transport, error) {
+	if options.reconnectDelay <= 0 {
+		options.reconnectDelay = 5 * time.Minute
+	}
 	endpoint, err := validatedEndpoint(p.Endpoint)
 	if err != nil {
 		return nil, err
@@ -494,7 +498,12 @@ func (t *Transport) receiveControl(connection *wsConnection, frame []byte) error
 	}
 	controls.sequence = command.Sequence
 	t.mu.Unlock()
-	result := browser.query(command.Query)
+	var result any
+	if command.Query.Type == "download" {
+		result = t.downloadFromClient(connection, command, browser)
+	} else {
+		result = browser.query(command.Query)
+	}
 
 	t.mu.Lock()
 	validConnection := t.conn == connection && t.sub != nil && t.sub.id == subID && t.sub.digest == subDigest
@@ -686,7 +695,6 @@ func (t *Transport) Watch(ctx context.Context) error {
 	if t.options.mode != "ws" {
 		return errors.New("live updates require WebSocket mode")
 	}
-	failures := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -698,7 +706,6 @@ func (t *Transport) Watch(ctx context.Context) error {
 		}
 		err := t.Connect()
 		if err == nil {
-			failures = 0
 			t.mu.Lock()
 			connection := t.conn
 			t.mu.Unlock()
@@ -717,18 +724,9 @@ func (t *Transport) Watch(ctx context.Context) error {
 			if errors.As(err, &rejected) {
 				return err
 			}
-			failures++
-		}
-		exponent := failures
-		if exponent > 4 {
-			exponent = 4
-		}
-		delay := 500 * time.Millisecond * time.Duration(1<<exponent)
-		if delay > 8*time.Second {
-			delay = 8 * time.Second
 		}
 		select {
-		case <-time.After(delay):
+		case <-time.After(t.options.reconnectDelay):
 		case <-ctx.Done():
 			t.Close()
 			return nil

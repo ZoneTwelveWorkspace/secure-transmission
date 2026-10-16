@@ -9,7 +9,7 @@ project and its private state are not changed or copied.
 Each completed implementation step has its own Git commit.
 
 - [x] Start the Go module and record the migration scope.
-- [ ] Port the client, encrypted records, filesystem access, and resumable spools.
+- [x] Port the client, encrypted records, filesystem access, and resumable spools.
 - [ ] Implement server identity, durable storage, HTTP/WebSocket reception, and ping.
 - [ ] Implement authenticated browsing, previews, and server-requested downloads.
 - [ ] Add the interactive server TUI and personalized client generation.
