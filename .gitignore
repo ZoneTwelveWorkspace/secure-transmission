@@ -1,0 +1,8 @@
+/bin/
+/dist/
+/state/
+/outbox/
+/generated-client*
+*.test
+*.prof
+.DS_Store
