@@ -77,7 +77,11 @@ func privateDirectory(directory string) (string, error) {
 	if err := validatePrivateDirectoryOwner(info); err != nil {
 		return "", err
 	}
-	return filepath.EvalSymlinks(directory)
+	resolved, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(resolved)
 }
 
 func writePrivate(filename string, data []byte) error {
